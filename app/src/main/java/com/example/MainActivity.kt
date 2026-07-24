@@ -811,7 +811,6 @@ class MainActivity : ComponentActivity() {
                                             Screen.ANALYTICS -> AnalyticsView(viewModel = viewModel)
                                             Screen.SETTINGS -> SettingsView(viewModel = viewModel)
                                             Screen.HEALTH -> com.example.ui.components.HealthView(viewModel = viewModel)
-                                            Screen.WORK_MANAGER_STUDIO -> com.example.ui.components.WorkManagerStudioView()
                                             Screen.FLEX_GRID_STUDIO -> com.example.ui.components.FlexGridStudioView(viewModel = viewModel)
                                         }
                                     }
@@ -1913,7 +1912,6 @@ class MainActivity : ComponentActivity() {
             Screen.ANALYTICS to NavigationItem(Screen.ANALYTICS, Icons.Default.Star, "Analytics"),
             Screen.SETTINGS to NavigationItem(Screen.SETTINGS, Icons.Default.Settings, "Settings"),
             Screen.HEALTH to NavigationItem(Screen.HEALTH, Icons.Default.Favorite, "Health"),
-            Screen.WORK_MANAGER_STUDIO to NavigationItem(Screen.WORK_MANAGER_STUDIO, Icons.Default.Build, "WorkManager"),
             Screen.FLEX_GRID_STUDIO to NavigationItem(Screen.FLEX_GRID_STUDIO, Icons.Default.Dashboard, "Layout Studio")
         )
         return order.mapNotNull { mapping[it] }

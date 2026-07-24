@@ -90,6 +90,10 @@ object DynamicCommandManager {
                             "Last_Updated" to ServerValue.TIMESTAMP
                         )
                         activeRef.updateChildren(idlePayload)
+                        activeRef.child("Heartbeat_Timestamp").removeValue()
+                        activeRef.child("Current_Timer_Mode").removeValue()
+                        activeRef.child("Is_Timer_Running").removeValue()
+                        activeRef.child("Total_Elapsed_Ms").removeValue()
                     } catch (e: Exception) {
                         Log.e(TAG, "Error in resetToIdle RTDB cleanup", e)
                     }
@@ -142,7 +146,9 @@ object DynamicCommandManager {
         
         // Clean out any duplicate adjacent identical events to keep the timeline clean
         val lastEvent = currentTimeline.lastOrNull()
-        val updatedTimeline = if (lastEvent != null && lastEvent.event == newEvent.event && (trueTime - lastEvent.timestamp < 1500)) {
+        val updatedTimeline = if (mappedAction == "START") {
+            listOf(newEvent)
+        } else if (lastEvent != null && lastEvent.event == newEvent.event && (trueTime - lastEvent.timestamp < 1500)) {
             currentTimeline
         } else {
             currentTimeline + newEvent
@@ -150,12 +156,12 @@ object DynamicCommandManager {
 
         // Generate Session_ID ONLY if action is "START", otherwise pass existing.
         if (mappedAction == "START") {
-            activeSessionId = java.util.UUID.randomUUID().toString()
+            activeSessionId = "sess_$trueTime"
             prefs.edit().putString("active_session_id_rtdb", activeSessionId).apply()
         } else if (activeSessionId.isEmpty()) {
             activeSessionId = prefs.getString("active_session_id_rtdb", "") ?: ""
             if (activeSessionId.isEmpty()) {
-                activeSessionId = java.util.UUID.randomUUID().toString()
+                activeSessionId = "sess_$trueTime"
                 prefs.edit().putString("active_session_id_rtdb", activeSessionId).apply()
             }
         }
@@ -240,7 +246,7 @@ object DynamicCommandManager {
 
             val payload = if (statusStr == "IDLE") {
                 mapOf<String, Any?>(
-                    "Command_Device_Name" to myDevice,
+                    "Command_Device_Name" to "None",
                     "Status" to "IDLE",
                     "Client_Elapsed_Ms" to null,
                     "Client_Heartbeat_Ms" to null,
@@ -268,6 +274,11 @@ object DynamicCommandManager {
 
             activeRef.updateChildren(payload).addOnCompleteListener { task ->
                 if (task.isSuccessful) {
+                    // Clean up legacy duplicate keys
+                    activeRef.child("Heartbeat_Timestamp").removeValue()
+                    activeRef.child("Current_Timer_Mode").removeValue()
+                    activeRef.child("Is_Timer_Running").removeValue()
+                    activeRef.child("Total_Elapsed_Ms").removeValue()
                     Log.d(TAG, "Successfully updated active focus timer payload in RTDB.")
                     // Trigger dynamic focus stats update to sync Todays_Focus_Ms in Realtime Database for peers
                     kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {

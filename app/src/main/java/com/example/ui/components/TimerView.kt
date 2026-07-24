@@ -247,6 +247,11 @@ fun TimerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
     val adoptedTodayMs by com.example.util.FocusTimerManager.adoptedTodayMs.collectAsStateWithLifecycle()
     val vaultHistory by viewModel.allHistoryVault.collectAsStateWithLifecycle(emptyList())
 
+    val timerEntryScope = rememberCoroutineScope()
+    LaunchedEffect(Unit) {
+        com.example.util.FocusTimerAnomalyChecker.runDeepAuditAndCheckAnomaly(context, timerEntryScope)
+    }
+
     // Auto-redirection when a Pomodoro or Stopwatch session is active
     LaunchedEffect(isTimerActive, isStopwatchActive, isPaused, wasStartedFromStopwatch, isTabFocusTimerSelected) {
         val isPomoActive = isTimerActive || (isPaused && !wasStartedFromStopwatch)
@@ -404,6 +409,14 @@ fun TimerView(viewModel: AppViewModel, modifier: Modifier = Modifier) {
             onDismiss = { showFriendsFocusDetails = false }
         )
     }
+
+    // Focus Timer Anomaly Inspector popup listener
+    FocusTimerAnomalyCard(
+        currentUsername = currentUsername ?: "",
+        onRunFullReconciliation = {
+            viewModel.triggerManualRecalibration { }
+        }
+    )
 
     // Centralized session timer confirm & auto-save controller
     TimerConfirmDialogController(
@@ -2404,6 +2417,12 @@ fun FriendsFocusDetailsDialog(
     onDismiss: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    
+    LaunchedEffect(Unit) {
+        com.example.util.FocusTimerAnomalyChecker.runDeepAuditAndCheckAnomaly(context, scope)
+    }
+
     val allUsers by viewModel.allUsers.collectAsStateWithLifecycle()
     val showElapsedTimeDialog by viewModel.showElapsedTimeDialog.collectAsState()
 
@@ -3178,11 +3197,17 @@ fun TimerHistoryView(
     var manualErrorMessage by remember { mutableStateOf<String?>(null) }
 
     // SEPARATE OVERVIEW AND FOCUS HISTORY PAGE
+    val context = androidx.compose.ui.platform.LocalContext.current
     var historySubTab by remember { mutableStateOf(0) } // 0 = Timeline & Logs, 1 = Cloud Sync & Devices, 2 = Diagnostics Logs
+    val historyAuditScope = rememberCoroutineScope()
+    LaunchedEffect(historySubTab) {
+        if (historySubTab == 0) {
+            com.example.util.FocusTimerAnomalyChecker.runDeepAuditAndCheckAnomaly(context, historyAuditScope)
+        }
+    }
     var fetchSessionIdInput by remember { mutableStateOf("") }
     var isDirectFetchingSession by remember { mutableStateOf(false) }
     val auditLogs by FocusTimerManager.systemLogs.collectAsStateWithLifecycle()
-    val context = androidx.compose.ui.platform.LocalContext.current
     val isCommandDevice by viewModel.isCommandDevice.collectAsStateWithLifecycle()
     val prefs = remember(context) { context.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE) }
 
@@ -8784,34 +8809,74 @@ fun VerticalCalendarTimelineView(
     var recordToDelete by remember { mutableStateOf<FocusRecord?>(null) }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     
-    // Filter records for the selected date
+    // Filter records for the selected date (including previous day's sessions crossing midnight)
     val todayRecords = remember(focusRecords, selectedDateStr) {
-        val filtered = focusRecords.filter { it.dateString == selectedDateStr || (it.dateString.isEmpty() && selectedDateStr == systemTodayStr) }
-        com.example.util.FocusTimerManager.sanitizeRecordsList(filtered)
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+        val calPrev = java.util.Calendar.getInstance()
+        try {
+            val selDate = sdf.parse(selectedDateStr)
+            if (selDate != null) {
+                calPrev.time = selDate
+                calPrev.add(java.util.Calendar.DAY_OF_YEAR, -1)
+            }
+        } catch (e: Exception) {}
+        val prevDateStr = sdf.format(calPrev.time)
+
+        val list = mutableListOf<FocusRecord>()
+        for (rec in focusRecords) {
+            val recDate = if (rec.dateString.isEmpty()) systemTodayStr else rec.dateString
+            if (recDate == selectedDateStr) {
+                list.add(rec)
+            } else if (recDate == prevDateStr) {
+                val sFrac = parseTimeToHourFraction(rec.startTime)
+                val eFrac = parseTimeToHourFraction(rec.endTime)
+                if (sFrac != null && eFrac != null && eFrac < sFrac) {
+                    list.add(rec) // Crossover into selectedDateStr!
+                }
+            }
+        }
+        com.example.util.FocusTimerManager.sanitizeRecordsList(list)
     }
 
     // Parse each record's start and end times into double hours (0.0 to 24.0)
     // Filters out sessions/sub-sessions less than 5 mins (User constraint: 5 mins min focus time).
     // Handles break splitting ("break emmup") by splitting the block if record.totalBreakMs > 0.
+    // Handles midnight crossover sessions (11:30 PM to 1:00 AM) by displaying 00:00 to 01:00 AM on the next day's timeline.
     val parsedSessions: List<Triple<Double, Double, FocusRecord>> = remember(todayRecords) {
         todayRecords.flatMap { record ->
-            val sFrac = parseTimeToHourFraction(record.startTime)
-            val eFrac = parseTimeToHourFraction(record.endTime)
-            if (sFrac != null && eFrac != null) {
-                val start = kotlin.math.min(sFrac, eFrac)
-                val end = kotlin.math.max(sFrac, eFrac)
-                val totalDurationHours = end - start
+            val sFracRaw = parseTimeToHourFraction(record.startTime)
+            val eFracRaw = parseTimeToHourFraction(record.endTime)
+            if (sFracRaw != null && eFracRaw != null) {
+                val sFrac: Double
+                val eFrac: Double
+                val recDate = if (record.dateString.isEmpty()) systemTodayStr else record.dateString
+
+                if (eFracRaw < sFracRaw) {
+                    // Crossover session! (e.g. 11:30 PM to 1:00 AM)
+                    if (recDate == selectedDateStr) {
+                        sFrac = sFracRaw
+                        eFrac = 24.0
+                    } else {
+                        sFrac = 0.0
+                        eFrac = eFracRaw
+                    }
+                } else {
+                    sFrac = kotlin.math.min(sFracRaw, eFracRaw)
+                    eFrac = kotlin.math.max(sFracRaw, eFracRaw)
+                }
+
+                val totalDurationHours = eFrac - sFrac
                 val totalBreakHours = (record.totalBreakMs / 1000.0) / 3600.0
                 val focusDurationHours = totalDurationHours - totalBreakHours
                 
                 if (record.totalBreakMs > 0 && totalBreakHours > 0.01 && focusDurationHours > 0.05) {
                     // Split into two sub-sessions with a break in the middle
                     val part1Dur = focusDurationHours / 2.0
-                    val part1Start = start
-                    val part1End = start + part1Dur
+                    val part1Start = sFrac
+                    val part1End = sFrac + part1Dur
                     
                     val part2Start = part1End + totalBreakHours
-                    val part2End = end
+                    val part2End = eFrac
                     val part2Dur = part2End - part2Start
                     
                     val list = mutableListOf<Triple<Double, Double, FocusRecord>>()
@@ -8821,7 +8886,7 @@ fun VerticalCalendarTimelineView(
                         val m = ((hr - h) * 60.0).toInt()
                         val ampm = if (h >= 12) "PM" else "AM"
                         val displayH = if (h == 0) 12 else if (h > 12) h - 12 else h
-                        String.format(Locale.US, "%02d:%02d %s", displayH, m, ampm)
+                        String.format(java.util.Locale.US, "%02d:%02d %s", displayH, m, ampm)
                     }
                     
                     if (part1Dur * 60.0 >= 4.99) {
@@ -8847,7 +8912,7 @@ fun VerticalCalendarTimelineView(
                     // No break or very short break
                     val durationMins = totalDurationHours * 60.0
                     if (durationMins >= 4.99) {
-                        listOf(Triple(start, end, record))
+                        listOf(Triple(sFrac, eFrac, record))
                     } else {
                         emptyList()
                     }
@@ -9522,10 +9587,96 @@ fun VerticalCalendarTimelineView(
                             )
                         }
                     } else {
+                        // Calculate Cumulative Focus Time Calculator map from oldest (bottom) to newest (top)
+                        val oldestToNewestRecords = remember(todayRecords) {
+                            todayRecords.sortedBy { parseTimeToHourFraction(it.startTime) ?: 0.0 }
+                        }
+
+                        val cumulativeFocusMap = remember(oldestToNewestRecords) {
+                            val map = mutableMapOf<String, Int>()
+                            var cumSecs = 0
+                            for (rec in oldestToNewestRecords) {
+                                cumSecs += rec.durationSeconds
+                                map[rec.id] = cumSecs
+                            }
+                            map
+                        }
+
+                        val totalCumulativeTodaySecs = remember(todayRecords) {
+                            todayRecords.sumOf { it.durationSeconds }
+                        }
+
                         Column(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
+                            // Cumulative Focus Time Calculator Banner Card
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 4.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0D1B2A)),
+                                border = BorderStroke(1.dp, Color(0xFF1E3A8A).copy(alpha = 0.6f)),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Calculate,
+                                                contentDescription = "Cumulative Focus Time Calculator",
+                                                tint = Color(0xFF60A5FA),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Text(
+                                                text = "Cumulative Focus Time Calculator",
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                        Surface(
+                                            color = Color(0xFF10B981).copy(alpha = 0.15f),
+                                            border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.4f)),
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = "Matches Today's Focused Time ✓",
+                                                color = Color(0xFF34D399),
+                                                fontSize = 8.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Today's Focus: ${formatSecondsToReadable(totalCumulativeTodaySecs)}",
+                                            color = Color(0xFF93C5FD),
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                        Text(
+                                            text = "Summed bottom-up (${todayRecords.size} sessions)",
+                                            color = Color.Gray,
+                                            fontSize = 9.sp
+                                        )
+                                    }
+                                }
+                            }
+
                             // Info Banner
                             Surface(
                                 modifier = Modifier.fillMaxWidth(),
@@ -9545,7 +9696,7 @@ fun VerticalCalendarTimelineView(
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Text(
-                                        text = "Showing all logged sessions of any duration. Click Edit to adjust the focus time.",
+                                        text = "Showing all logged sessions. Cumulative calculator sums from oldest to newest session.",
                                         color = Color(0xFF6EE7B7),
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Medium
@@ -9555,6 +9706,8 @@ fun VerticalCalendarTimelineView(
 
                             todayRecords.forEach { record ->
                                 val tagColor = getTagColorCalendar(record.tag)
+                                val cumSecs = cumulativeFocusMap[record.id] ?: record.durationSeconds
+
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -9620,7 +9773,7 @@ fun VerticalCalendarTimelineView(
 
                                         Spacer(modifier = Modifier.width(8.dp))
 
-                                        // Right Side details: Duration, Edit/Delete Actions
+                                        // Right Side details: Duration, Cumulative, Edit/Delete Actions
                                         Column(
                                             horizontalAlignment = Alignment.End,
                                             verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -9630,6 +9783,12 @@ fun VerticalCalendarTimelineView(
                                                 color = Color(0xFFFFB300), // Arena Gold
                                                 fontWeight = FontWeight.Black,
                                                 fontSize = 12.sp
+                                            )
+                                            Text(
+                                                text = "Cum: ${formatSecondsToReadable(cumSecs)}",
+                                                color = Color(0xFF38BDF8),
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 9.5.sp
                                             )
 
                                             Row(

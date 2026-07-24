@@ -80,7 +80,7 @@ object DevicePresenceManager {
                         "App_Version" to getAppVersionString(context)
                     )
 
-                    presenceRef.setValue(payload).addOnCompleteListener { task ->
+                    presenceRef.updateChildren(payload).addOnCompleteListener { task ->
                         if (task.isSuccessful) {
                             Log.d(TAG, "Successfully registered presence payload with FCM token for $deviceKey")
                             // Also update the focus timings for this device
@@ -108,7 +108,7 @@ object DevicePresenceManager {
                     "App_Version_No" to getAppVersionString(context),
                     "App_Version" to getAppVersionString(context)
                 )
-                presenceRef.setValue(payload).addOnCompleteListener { task ->
+                presenceRef.updateChildren(payload).addOnCompleteListener { task ->
                     if (task.isSuccessful) {
                         Log.d(TAG, "Successfully registered fallback presence payload for $deviceKey")
                         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
@@ -261,6 +261,21 @@ object DevicePresenceManager {
                 }
             }
 
+            // Include current active live session time if timer or stopwatch is actively running/paused
+            val activeSessionMs = if (com.example.util.FocusTimerManager.isTimerRunning.value ||
+                                      com.example.util.FocusTimerManager.isStopwatchActive.value ||
+                                      com.example.util.FocusTimerManager.isPaused.value) {
+                com.example.util.FocusTimerManager.accumulatedSessionTimeMs.value
+            } else 0L
+
+            if (activeSessionMs > 0L) {
+                todayFocusMs += activeSessionMs
+                past7DaysFocusMs += activeSessionMs
+                past30DaysFocusMs += activeSessionMs
+                past50DaysFocusMs += activeSessionMs
+                allTimeFocusMs += activeSessionMs
+            }
+
             // Adopt highest today focus from other devices using the FRESH localTodayFocusMs
             adoptHighestTodayFocusMsFromOtherDevices(context, email, todayFocusMs)
 
@@ -296,15 +311,23 @@ object DevicePresenceManager {
                     .child(deviceKey)
 
                 val formattedNow = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(nowMs))
-                val statsUpdates = mapOf(
+                val deviceNameStr = android.os.Build.MODEL ?: "Android Device"
+                val statsUpdates = mapOf<String, Any>(
                     "Todays_Focus_Ms" to finalTodayFocusMs,
+                    "todayFocusMs" to finalTodayFocusMs,
                     "Past_7_Days_Focus_Ms" to finalPast7DaysFocusMs,
                     "Past_30_Days_Focus_Ms" to finalPast30DaysFocusMs,
                     "Past_50_Days_Focus_Ms" to finalPast50DaysFocusMs,
                     "All_Time_Focus_Ms" to finalAllTimeFocusMs,
                     "Last_Stats_Updated" to formattedNow,
                     "Last_Update_Time_and_Date" to formattedNow,
+                    "lastActiveTime" to formattedNow,
+                    "lastUpdateDate" to todayStr,
                     "Upload_Status" to "COMPLETED",
+                    "uploadStatus" to "COMPLETED",
+                    "Login_status" to true,
+                    "isLoggedIn" to true,
+                    "deviceName" to deviceNameStr,
                     "App_Version_No" to getAppVersionString(context),
                     "App_Version" to getAppVersionString(context)
                 )

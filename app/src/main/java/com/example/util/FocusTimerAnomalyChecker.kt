@@ -210,6 +210,41 @@ object FocusTimerAnomalyChecker {
         }
     }
 
+    fun runDeepAuditAndCheckAnomaly(context: Context, scope: CoroutineScope) {
+        val appContext = context.applicationContext
+        scope.launch(Dispatchers.IO) {
+            try {
+                Log.d(TAG, "Running deep audit & focus alignment before anomaly check...")
+                FocusTimerManager.runBackgroundAuditAndHealing(appContext)
+                val activeEmail = DynamicCommandManager.activeEmail
+                if (activeEmail.isNotBlank()) {
+                    try {
+                        FocusReconciliationEngine.runReconciliation(appContext, activeEmail)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Reconciliation error inside deep audit", e)
+                    }
+                    try {
+                        com.example.api.DevicePresenceManager.updateDeviceFocusStats(appContext, activeEmail)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Device stats update error inside deep audit", e)
+                    }
+                }
+
+                // After deep audit and alignment run, check diagnostic report
+                val report = runDiagnosticCheck(appContext)
+                if (report.anomalyType != AnomalyType.SYSTEM_HEALTHY) {
+                    Log.w(TAG, "Unresolved discrepancy detected after deep audit: ${report.title}")
+                    _lastDetectedAnomaly.value = report
+                } else {
+                    Log.d(TAG, "Deep audit aligned focus and sync cleanly. System is healthy.")
+                    _lastDetectedAnomaly.value = null
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error running runDeepAuditAndCheckAnomaly", e)
+            }
+        }
+    }
+
     fun applyFixAction(
         action: FixAction,
         context: Context,

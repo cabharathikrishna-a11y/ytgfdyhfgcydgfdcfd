@@ -49,6 +49,7 @@ fun FocusTimerAnomalyCard(
     LaunchedEffect(activeAnomaly) {
         if (activeAnomaly != null && activeAnomaly?.anomalyType != AnomalyType.SYSTEM_HEALTHY) {
             currentReport = activeAnomaly
+            showDialog = true
         }
     }
 

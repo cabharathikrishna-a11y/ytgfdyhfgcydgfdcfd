@@ -213,14 +213,25 @@ object FirebaseRepairKit {
         if (!timerSnap.hasChild("User_Emoji") || timerSnap.child("User_Emoji").getValue(String::class.java).isNullOrBlank()) {
             timerUpdates["User_Emoji"] = emoji
         }
-        if (!timerSnap.hasChild("Is_Timer_Running")) {
-            timerUpdates["Is_Timer_Running"] = false
+        if (!timerSnap.hasChild("Status")) {
+            timerUpdates["Status"] = "IDLE"
         }
-        if (!timerSnap.hasChild("Current_Timer_Mode")) {
-            timerUpdates["Current_Timer_Mode"] = "IDLE"
+        if (!timerSnap.hasChild("Command_Device_Name")) {
+            timerUpdates["Command_Device_Name"] = "None"
         }
-        if (!timerSnap.hasChild("Total_Elapsed_Ms")) {
-            timerUpdates["Total_Elapsed_Ms"] = 0L
+
+        // Clean up obsolete/duplicate keys if present in RTDB
+        if (timerSnap.hasChild("Is_Timer_Running")) {
+            timerRef.child("Is_Timer_Running").removeValue()
+        }
+        if (timerSnap.hasChild("Current_Timer_Mode")) {
+            timerRef.child("Current_Timer_Mode").removeValue()
+        }
+        if (timerSnap.hasChild("Total_Elapsed_Ms")) {
+            timerRef.child("Total_Elapsed_Ms").removeValue()
+        }
+        if (timerSnap.hasChild("Heartbeat_Timestamp")) {
+            timerRef.child("Heartbeat_Timestamp").removeValue()
         }
 
         if (timerUpdates.isNotEmpty()) {

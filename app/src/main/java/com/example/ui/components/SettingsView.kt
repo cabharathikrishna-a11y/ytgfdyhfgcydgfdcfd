@@ -7060,7 +7060,6 @@ fun SettingsGeneralSystemPage(
                                 Screen.ARENA -> "Arena"
                                 Screen.FOCUS_LOCKER -> "Focus Locker"
                                 Screen.MESSAGES -> "Messages"
-                                Screen.WORK_MANAGER_STUDIO -> "WorkManager"
                                 Screen.FLEX_GRID_STUDIO -> "Layout Studio"
                             }
 

@@ -195,6 +195,8 @@ jobs:
       with:
         tag_name: v1.0.${{ env.VERSION_CODE }}
         name: Release v1.0.${{ env.VERSION_CODE }}
+        draft: false
+        make_latest: "true"
         body: |
           Automated build updates compiled successfully via GitHub Actions.
           Tracking Identifier: Build #${{ github.run_number }} (Version Code: ${{ env.VERSION_CODE }}, Version Name: ${{ env.VERSION_NAME }})
@@ -213,13 +215,13 @@ jobs:
         
         echo "Verifying that release links are active and reachable..."
         
-        # Verify APK URL
+        # Verify APK URL using GET range request (S3 signed URLs block HEAD/curl -I requests with 404/403)
         APK_SUCCESS=false
         for i in {1..30}; do
           echo "Verifying APK Link (Attempt $i)..."
-          CODE=$(curl -s -L -I -o /dev/null -w "%{http_code}" "$APK_URL" || true)
+          CODE=$(curl -s -L -r 0-1024 -A "Mozilla/5.0" -o /dev/null -w "%{http_code}" "$APK_URL" || true)
           echo "HTTP Code: $CODE"
-          if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then
+          if [ "$CODE" = "200" ] || [ "$CODE" = "206" ] || [ "$CODE" = "302" ]; then
             echo "SUCCESS: APK Download Link is verified!"
             APK_SUCCESS=true
             break
@@ -232,13 +234,13 @@ jobs:
           exit 1
         fi
         
-        # Verify Patch URL
+        # Verify Patch URL using GET range request
         PATCH_SUCCESS=false
         for i in {1..30}; do
           echo "Verifying Patch Link (Attempt $i)..."
-          CODE=$(curl -s -L -I -o /dev/null -w "%{http_code}" "$PATCH_URL" || true)
+          CODE=$(curl -s -L -r 0-1024 -A "Mozilla/5.0" -o /dev/null -w "%{http_code}" "$PATCH_URL" || true)
           echo "HTTP Code: $CODE"
-          if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then
+          if [ "$CODE" = "200" ] || [ "$CODE" = "206" ] || [ "$CODE" = "302" ]; then
             echo "SUCCESS: Patch Download Link is verified!"
             PATCH_SUCCESS=true
             break

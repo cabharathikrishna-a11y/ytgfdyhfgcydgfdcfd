@@ -40,7 +40,7 @@ data class DriftReport(
 object FocusDriftDetector {
     private const val TAG = "FocusDriftDetector"
     const val DRIFT_THRESHOLD_SECONDS = 5.0
-    private const val HEARTBEAT_INTERVAL_MS = 5000L
+    private const val HEARTBEAT_INTERVAL_MS = 15_000L
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private var monitoringJob: Job? = null
@@ -87,7 +87,8 @@ object FocusDriftDetector {
     }
 
     /**
-     * Starts continuous background monitoring of client heartbeats vs RTDB timestamps.
+     * Starts monitoring client heartbeats vs RTDB timestamps ONLY while a session is active.
+     * When idle, the service stands down immediately to prevent battery drain.
      */
     fun startMonitoring(context: Context, email: String) {
         val appContext = context.applicationContext
@@ -96,9 +97,20 @@ object FocusDriftDetector {
         monitoringJob?.cancel()
         monitoringJob = scope.launch {
             Log.d(TAG, "Starting Focus Drift Detector monitoring service...")
-            _lastSyncStatus.value = "MONITORING_ACTIVE"
 
             while (true) {
+                val isSessionActive = FocusTimerManager.isTimerRunning.value ||
+                                      FocusTimerManager.isStopwatchActive.value ||
+                                      FocusTimerManager.isPaused.value
+
+                if (!isSessionActive) {
+                    Log.d(TAG, "Timer is IDLE. Stopping background heartbeat loop to save battery.")
+                    _lastSyncStatus.value = "IDLE"
+                    ensureRtdbIdleState(appContext, email)
+                    break
+                }
+
+                _lastSyncStatus.value = "MONITORING_ACTIVE"
                 try {
                     val clientElapsedMs = FocusTimerManager.accumulatedSessionTimeMs.value
                     sendHeartbeatAndCheckDrift(appContext, email, clientElapsedMs)
@@ -111,13 +123,57 @@ object FocusDriftDetector {
     }
 
     /**
-     * Stops continuous monitoring.
+     * Stops continuous monitoring and ensures clean IDLE state in RTDB.
      */
     fun stopMonitoring() {
         monitoringJob?.cancel()
         monitoringJob = null
         _lastSyncStatus.value = "IDLE"
         Log.d(TAG, "Stopped Focus Drift Detector monitoring service.")
+    }
+
+    /**
+     * Ensures RTDB ACTIVE_FOCUS_TIMER node is clean and explicitly IDLE,
+     * removing stale active session fields and duplicate legacy keys.
+     */
+    suspend fun ensureRtdbIdleState(context: Context, email: String) {
+        val appContext = context.applicationContext
+        val targetEmail = if (email.isBlank()) DynamicCommandManager.activeEmail else email
+        if (targetEmail.isBlank()) return
+
+        try {
+            val dbUrl = FirebaseConfig.getDatabaseUrl(appContext)
+            if (dbUrl.isNotEmpty()) {
+                val database = FirebaseDatabase.getInstance(dbUrl)
+                val sanitizedEmail = DevicePresenceManager.sanitizeEmail(targetEmail)
+                val activeRef = database.getReference("FOCUS_TIMMER")
+                    .child("USER")
+                    .child(sanitizedEmail)
+                    .child("ACTIVE_FOCUS_TIMER")
+
+                val idlePayload = mapOf<String, Any?>(
+                    "Command_Device_Name" to "None",
+                    "Status" to "IDLE",
+                    "Client_Elapsed_Ms" to null,
+                    "Client_Heartbeat_Ms" to null,
+                    "Timer_Mode" to null,
+                    "Session_ID" to null,
+                    "Current_Task" to null,
+                    "Current_Tag" to null,
+                    "Timeline" to null,
+                    "Last_Updated" to ServerValue.TIMESTAMP
+                )
+                activeRef.updateChildren(idlePayload).await()
+
+                // Clean up duplicate/legacy fields
+                activeRef.child("Heartbeat_Timestamp").removeValue()
+                activeRef.child("Current_Timer_Mode").removeValue()
+                activeRef.child("Is_Timer_Running").removeValue()
+                activeRef.child("Total_Elapsed_Ms").removeValue()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error ensuring idle state in RTDB: ${e.message}")
+        }
     }
 
     /**
@@ -136,6 +192,22 @@ object FocusDriftDetector {
         var firebaseTimestampMs = nowClientMs + serverTimeOffsetMs
         var firebaseElapsedSecs = clientElapsedSecs
 
+        val isRunning = FocusTimerManager.isTimerRunning.value || FocusTimerManager.isStopwatchActive.value || FocusTimerManager.isPaused.value
+
+        if (!isRunning) {
+            ensureRtdbIdleState(appContext, email)
+            return DriftReport(
+                timestampMs = nowClientMs,
+                clientHeartbeatMs = nowClientMs,
+                firebaseTimestampMs = nowClientMs,
+                clientElapsedSecs = 0,
+                firebaseElapsedSecs = 0,
+                driftSeconds = 0.0,
+                isExceedingThreshold = false,
+                statusMessage = "IDLE - Heartbeat paused."
+            )
+        }
+
         try {
             val dbUrl = FirebaseConfig.getDatabaseUrl(appContext)
             if (dbUrl.isNotEmpty() && email.isNotEmpty()) {
@@ -146,34 +218,29 @@ object FocusDriftDetector {
                     .child(sanitizedEmail)
                     .child("ACTIVE_FOCUS_TIMER")
 
-                val isRunning = FocusTimerManager.isTimerRunning.value || FocusTimerManager.isStopwatchActive.value || FocusTimerManager.isPaused.value
-                // Update RTDB with heartbeat payload
-                val heartbeatPayload = if (isRunning && clientElapsedMs > 0L) {
-                    mapOf<String, Any?>(
-                        "Heartbeat_Timestamp" to ServerValue.TIMESTAMP,
-                        "Client_Heartbeat_Ms" to nowClientMs,
-                        "Client_Elapsed_Ms" to clientElapsedMs,
-                        "Last_Updated" to ServerValue.TIMESTAMP
-                    )
-                } else {
-                    mapOf<String, Any?>(
-                        "Heartbeat_Timestamp" to ServerValue.TIMESTAMP,
-                        "Client_Heartbeat_Ms" to nowClientMs,
-                        "Client_Elapsed_Ms" to null,
-                        "Last_Updated" to ServerValue.TIMESTAMP
-                    )
-                }
+                // Update RTDB with clean single-timestamp heartbeat payload
+                val heartbeatPayload = mapOf<String, Any?>(
+                    "Client_Heartbeat_Ms" to nowClientMs,
+                    "Client_Elapsed_Ms" to (if (clientElapsedMs > 0L) clientElapsedMs else null),
+                    "Last_Updated" to ServerValue.TIMESTAMP
+                )
                 activeRef.updateChildren(heartbeatPayload).await()
+
+                // Remove legacy duplicate fields
+                activeRef.child("Heartbeat_Timestamp").removeValue()
+                activeRef.child("Current_Timer_Mode").removeValue()
+                activeRef.child("Is_Timer_Running").removeValue()
+                activeRef.child("Total_Elapsed_Ms").removeValue()
 
                 // Read back updated server values
                 val snapshot = activeRef.get().await()
                 if (snapshot.exists()) {
-                    val rtdbHeartbeat = snapshot.child("Heartbeat_Timestamp").getValue(Long::class.java)
-                        ?: snapshot.child("Last_Updated").getValue(Long::class.java)
+                    val rtdbHeartbeat = snapshot.child("Last_Updated").getValue(Long::class.java)
+                        ?: snapshot.child("Heartbeat_Timestamp").getValue(Long::class.java)
                     if (rtdbHeartbeat != null && rtdbHeartbeat > 0) {
                         firebaseTimestampMs = rtdbHeartbeat
                     }
-                    val rtdbElapsed = snapshot.child("Client_Elapsed_Ms").getValue(Long::class.java) ?: if (isRunning) clientElapsedMs else 0L
+                    val rtdbElapsed = snapshot.child("Client_Elapsed_Ms").getValue(Long::class.java) ?: clientElapsedMs
                     firebaseElapsedSecs = rtdbElapsed / 1000
                 }
             }
@@ -270,7 +337,7 @@ object FocusDriftDetector {
                 isTimerRunning -> "Focusing"
                 isStopwatchActive -> "Focusing (Stopwatch)"
                 isPaused -> "Paused"
-                else -> "Relaxing"
+                else -> "IDLE"
             }
 
             val isSessionActive = (isTimerRunning || isStopwatchActive || isPaused) && clientElapsedMs > 0L
@@ -289,14 +356,13 @@ object FocusDriftDetector {
                         "Status" to statusStr,
                         "Client_Elapsed_Ms" to clientElapsedMs,
                         "Client_Heartbeat_Ms" to nowMs,
-                        "Heartbeat_Timestamp" to ServerValue.TIMESTAMP,
                         "Last_Updated" to ServerValue.TIMESTAMP,
                         "Resynced_At" to ServerValue.TIMESTAMP,
                         "Resync_Source" to "FocusDriftDetector_AutoResync"
                     )
                 } else {
                     mapOf<String, Any?>(
-                        "Command_Device_Name" to myDevice,
+                        "Command_Device_Name" to "None",
                         "Status" to "IDLE",
                         "Client_Elapsed_Ms" to null,
                         "Client_Heartbeat_Ms" to null,
@@ -305,7 +371,6 @@ object FocusDriftDetector {
                         "Current_Task" to null,
                         "Current_Tag" to null,
                         "Timeline" to null,
-                        "Heartbeat_Timestamp" to ServerValue.TIMESTAMP,
                         "Last_Updated" to ServerValue.TIMESTAMP,
                         "Resynced_At" to ServerValue.TIMESTAMP,
                         "Resync_Source" to "FocusDriftDetector_AutoResync"
@@ -313,6 +378,12 @@ object FocusDriftDetector {
                 }
 
                 activeRef.updateChildren(resyncPayload).await()
+
+                // Remove legacy duplicate keys
+                activeRef.child("Heartbeat_Timestamp").removeValue()
+                activeRef.child("Current_Timer_Mode").removeValue()
+                activeRef.child("Is_Timer_Running").removeValue()
+                activeRef.child("Total_Elapsed_Ms").removeValue()
             }
 
             // Also update DevicePresenceManager focus stats for friends/peers

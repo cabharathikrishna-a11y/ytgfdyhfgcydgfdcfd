@@ -37,7 +37,12 @@ object SessionTerminator {
 
             // Action 2: Check for a Midnight Crossover
             val firstStartEvent = updatedTimeline.firstOrNull { it.event.lowercase() == "start" }
-            val firstStartTs = firstStartEvent?.timestamp ?: updatedTimeline.firstOrNull()?.timestamp ?: trueTime
+            val sessionStartFromId = originalSessionId.substringAfter("sess_").toLongOrNull()
+            val firstStartTs = if (sessionStartFromId != null && sessionStartFromId > 0L && sessionStartFromId <= trueTime) {
+                sessionStartFromId
+            } else {
+                firstStartEvent?.timestamp ?: updatedTimeline.firstOrNull()?.timestamp ?: trueTime
+            }
 
             val isSameDay = isSameDay(firstStartTs, trueTime)
 
@@ -97,6 +102,14 @@ object SessionTerminator {
 
             // Overwrite ACTIVE_FOCUS_TIMER in RTDB with {"Status": "Relaxing", "Command_Device_Name": "None"}
             shrinkActiveFocusTimerInRTDB(context, email)
+
+            // Clear local active session ID and timeline
+            DynamicCommandManager.activeSessionId = ""
+            DynamicCommandManager.currentTimelineFlow.value = emptyList()
+            context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE).edit()
+                .remove("active_session_id_rtdb")
+                .remove("session_timeline_json")
+                .apply()
         } finally {
             try {
                 com.example.service.KeepAliveService.updateNotification(context)
@@ -156,6 +169,10 @@ object SessionTerminator {
 
                 // Update children to preserve User_Emoji, User_Display_Name, etc.
                 activeRef.updateChildren(shrinkPayload)
+                activeRef.child("Heartbeat_Timestamp").removeValue()
+                activeRef.child("Current_Timer_Mode").removeValue()
+                activeRef.child("Is_Timer_Running").removeValue()
+                activeRef.child("Total_Elapsed_Ms").removeValue()
                 Log.d(TAG, "Successfully shrank active RTDB node to IDLE status.")
             } catch (e: Exception) {
                 Log.e(TAG, "Error shrinking active focus timer in RTDB", e)
