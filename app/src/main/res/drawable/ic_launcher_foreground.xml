@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Ambient Blue Glow Under 'OS' -->
+    <path
+        android:pathData="M 32,66 C 32,58 76,58 76,66 C 76,74 32,74 32,66 Z"
+        android:fillColor="#102580FF" />
+
+    <!-- "LIFE" Typography - Bold Crisp White (#FFFFFF) -->
+    <!-- L -->
+    <path
+        android:pathData="M 28,34 L 28,48 L 36,48"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- I -->
+    <path
+        android:pathData="M 42,34 L 42,48"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round" />
+
+    <!-- F -->
+    <path
+        android:pathData="M 49,34 L 49,48 M 49,34 L 58,34 M 49,41 L 56,41"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- E -->
+    <path
+        android:pathData="M 64,34 L 64,48 M 64,34 L 73,34 M 64,41 L 71,41 M 64,48 L 73,48"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- "OS" Typography - Luminous Electric Blue (#2580FF) -->
+    <!-- O -->
+    <path
+        android:pathData="M 42,60 A 7,7 0 1,1 41.9,60 Z"
+        android:strokeColor="#2580FF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round" />
+
+    <!-- S -->
+    <path
+        android:pathData="M 68,61 C 67,59 62,58 59,61 C 56,64 56,67 61,67.5 C 66,68 67,71 65,73.5 C 63,75.5 58,75 55,73"
+        android:strokeColor="#2580FF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+</vector>
