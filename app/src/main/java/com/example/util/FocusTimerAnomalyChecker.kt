@@ -90,25 +90,63 @@ object FocusTimerAnomalyChecker {
      * Runs an on-demand comprehensive diagnostic check across SQLite Vault, SharedPrefs,
      * cross-device adopted stats, and active timer buffers to identify any hidden discrepancies.
      */
-    suspend fun runDiagnosticCheck(context: Context): AnomalyReport {
+    suspend fun runDiagnosticCheck(context: Context, isManualRequest: Boolean = false): AnomalyReport {
         val appContext = context.applicationContext
+        val prefs = appContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+
+        // Check if user recently dismissed anomaly popups unless manually requested
+        val dismissedUntil = prefs.getLong("anomaly_dismissed_until", 0L)
+        if (!isManualRequest && System.currentTimeMillis() < dismissedUntil) {
+            return AnomalyReport(
+                oldFocusSeconds = 0,
+                newFocusSeconds = 0,
+                deltaSeconds = 0,
+                anomalyType = AnomalyType.SYSTEM_HEALTHY,
+                title = "Focus Timer Fully Healthy",
+                reasonExplanation = "All components are aligned and healthy.",
+                technicalDetails = "Alert suppressed by recent user dismissal.",
+                recommendedFixes = listOf(FixAction.DISMISS)
+            )
+        }
+
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val db = AppDatabase.getInstance(appContext)
 
         // 1. Local Vault Total
-        val vaultRecords = db.localHistoryVaultDao().getAllHistoryDirect()
+        var vaultRecords = db.localHistoryVaultDao().getAllHistoryDirect()
             .filter { it.date_string == todayStr }
-        val vaultTotalMs = vaultRecords.sumOf { it.total_focus_ms }
-        val vaultTotalSecs = (vaultTotalMs / 1000).toInt()
+        var vaultTotalMs = vaultRecords.sumOf { it.total_focus_ms }
+        var vaultTotalSecs = (vaultTotalMs / 1000).toInt()
 
         // 2. FocusRecord Entity Total
-        val focusRecordSecs = db.focusRecordDao().getRecordsForDate(todayStr)
+        var focusRecordSecs = db.focusRecordDao().getRecordsForDate(todayStr)
             .sumOf { it.durationSeconds }
 
+        // Auto-heal discrepancy between Vault DB and FocusRecord DB automatically
+        if (kotlin.math.abs(vaultTotalSecs - focusRecordSecs) > 120) {
+            Log.d(TAG, "Database discrepancy detected (Vault: ${vaultTotalSecs}s vs FocusRecords: ${focusRecordSecs}s). Running auto-heal...")
+            FocusTimerManager.autoHealVaultAndFocusRecords(appContext)
+
+            vaultRecords = db.localHistoryVaultDao().getAllHistoryDirect()
+                .filter { it.date_string == todayStr }
+            vaultTotalMs = vaultRecords.sumOf { it.total_focus_ms }
+            vaultTotalSecs = (vaultTotalMs / 1000).toInt()
+            focusRecordSecs = db.focusRecordDao().getRecordsForDate(todayStr)
+                .sumOf { it.durationSeconds }
+            Log.d(TAG, "Post auto-heal -> Vault: ${vaultTotalSecs}s, FocusRecords: ${focusRecordSecs}s.")
+        }
+
         // 3. Shared Preferences / Memory total
-        val prefs = appContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        val prefMinutes = prefs.getInt("total_focus_minutes", 0)
-        val prefSecs = prefMinutes * 60
+        var prefMinutes = prefs.getInt("total_focus_minutes", 0)
+        var prefSecs = prefMinutes * 60
+
+        // Auto-heal stale preference total
+        if (kotlin.math.abs(prefSecs - vaultTotalSecs) > 300) {
+            val correctMinutes = vaultTotalSecs / 60
+            prefs.edit().putInt("total_focus_minutes", correctMinutes).apply()
+            prefMinutes = correctMinutes
+            prefSecs = correctMinutes * 60
+        }
 
         // 4. Focus Drift Check
         val meEmail = DynamicCommandManager.activeEmail.lowercase().trim()
@@ -150,18 +188,6 @@ object FocusTimerAnomalyChecker {
                     title = "Database & Vault Discrepancy",
                     reasonExplanation = "A slight mismatch exists between local session history (${vaultTotalSecs / 60}m) and local focus records (${focusRecordSecs / 60}m).",
                     technicalDetails = "Vault DB: ${vaultTotalSecs}s vs FocusRecords DB: ${focusRecordSecs}s.",
-                    recommendedFixes = listOf(FixAction.RUN_DEEP_RECONCILIATION, FixAction.RECALCULATE_LOCAL_VAULT, FixAction.DISMISS)
-                )
-            }
-            kotlin.math.abs(prefSecs - vaultTotalSecs) > 300 && adoptedSecs == 0 -> {
-                AnomalyReport(
-                    oldFocusSeconds = prefSecs,
-                    newFocusSeconds = vaultTotalSecs,
-                    deltaSeconds = vaultTotalSecs - prefSecs,
-                    anomalyType = AnomalyType.STALE_PREFERENCE_HEALED,
-                    title = "Cached Today Total Recalibration Needed",
-                    reasonExplanation = "Your cached display total (${prefSecs / 60}m) differs from verified local session logs (${vaultTotalSecs / 60}m).",
-                    technicalDetails = "SharedPreferences total_focus_minutes ($prefMinutes) vs Vault DB total ($vaultTotalSecs).",
                     recommendedFixes = listOf(FixAction.RUN_DEEP_RECONCILIATION, FixAction.RECALCULATE_LOCAL_VAULT, FixAction.DISMISS)
                 )
             }
@@ -293,14 +319,21 @@ object FocusTimerAnomalyChecker {
                         }
                     }
                     FixAction.DISMISS -> {
-                        _lastDetectedAnomaly.value = null
+                        clearAndDismissAnomaly(appContext)
                         onResult("Alert dismissed.")
                     }
                 }
+                clearAndDismissAnomaly(appContext)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed applying fix action $action", e)
                 onResult("❌ Error applying fix: ${e.localizedMessage}")
             }
         }
+    }
+
+    fun clearAndDismissAnomaly(context: Context) {
+        _lastDetectedAnomaly.value = null
+        val prefs = context.applicationContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putLong("anomaly_dismissed_until", System.currentTimeMillis() + 86400000L).apply()
     }
 }

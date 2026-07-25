@@ -147,12 +147,7 @@ fun LiveSphereScreen(
         var localActiveMs = 0L
         val hasActiveSession = (isTimerRunning || isStopwatchActive || accumulatedSessionTimeMs > 0L) && com.example.util.FocusTimerManager.pendingFocusReview.value == null
         if (hasActiveSession) {
-            localActiveMs = if (isFocusPhase && !isPaused) {
-                val currentChunkMs = com.example.util.FocusTimerManager.getCurrentChunkMs()
-                accumulatedSessionTimeMs + currentChunkMs
-            } else {
-                accumulatedSessionTimeMs
-            }
+            localActiveMs = accumulatedSessionTimeMs
         }
         baseCompletedMs + localActiveMs
     }

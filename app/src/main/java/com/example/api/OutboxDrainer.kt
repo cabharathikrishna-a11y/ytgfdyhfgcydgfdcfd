@@ -469,18 +469,64 @@ object OutboxDrainer {
                 return true
             }
             "ARCHIVE_SESSION" -> {
-                val recordId = payload.optString("recordId")
-                val dateString = payload.optString("dateString")
-                val subject = payload.optString("subject")
-                val taskTitle = payload.optString("taskTitle")
-                
-                var totalFocusMs = payload.optLong("totalFocusMs", 0L)
+                val recordId = if (payload.has("recordId") && payload.optString("recordId").isNotEmpty()) {
+                    payload.optString("recordId")
+                } else if (payload.has("Session_ID") && payload.optString("Session_ID").isNotEmpty()) {
+                    payload.optString("Session_ID")
+                } else if (payload.has("sessionId") && payload.optString("sessionId").isNotEmpty()) {
+                    payload.optString("sessionId")
+                } else {
+                    ""
+                }
+
+                if (recordId.isBlank()) {
+                    Log.e("OutboxDrainer", "Cannot process ARCHIVE_SESSION with empty recordId. Discarding queue item.")
+                    return true
+                }
+
+                val subject = if (payload.has("subject") && payload.optString("subject").isNotEmpty()) {
+                    payload.optString("subject")
+                } else if (payload.has("Current_Tag") && payload.optString("Current_Tag").isNotEmpty()) {
+                    payload.optString("Current_Tag")
+                } else {
+                    "Study"
+                }
+
+                val taskTitle = if (payload.has("taskTitle") && payload.optString("taskTitle").isNotEmpty()) {
+                    payload.optString("taskTitle")
+                } else if (payload.has("Current_Task") && payload.optString("Current_Task").isNotEmpty()) {
+                    payload.optString("Current_Task")
+                } else {
+                    "General Focus"
+                }
+
+                var totalFocusMs = if (payload.has("totalFocusMs") && payload.optLong("totalFocusMs") > 0L) {
+                    payload.optLong("totalFocusMs")
+                } else if (payload.has("Total_Focus_Time_Ms") && payload.optLong("Total_Focus_Time_Ms") > 0L) {
+                    payload.optLong("Total_Focus_Time_Ms")
+                } else 0L
+
+                var totalBreakMs = if (payload.has("totalBreakMs") && payload.optLong("totalBreakMs") > 0L) {
+                    payload.optLong("totalBreakMs")
+                } else if (payload.has("Total_Break_Time_Ms") && payload.optLong("Total_Break_Time_Ms") > 0L) {
+                    payload.optLong("Total_Break_Time_Ms")
+                } else 0L
+
+                var startTimeMs = if (payload.has("startTimeMs") && payload.optLong("startTimeMs") > 0L) {
+                    payload.optLong("startTimeMs")
+                } else if (payload.has("Start_Timestamp") && payload.optLong("Start_Timestamp") > 0L) {
+                    payload.optLong("Start_Timestamp")
+                } else 0L
+
+                var endTimeMs = if (payload.has("endTimeMs") && payload.optLong("endTimeMs") > 0L) {
+                    payload.optLong("endTimeMs")
+                } else if (payload.has("End_Timestamp") && payload.optLong("End_Timestamp") > 0L) {
+                    payload.optLong("End_Timestamp")
+                } else 0L
+
                 var startTimeFormatted = payload.optString("startTimeFormatted", "")
                 var endTimeFormatted = payload.optString("endTimeFormatted", "")
                 var durationFormatted = payload.optString("durationFormatted", "")
-                var startTimeMs = payload.optLong("startTimeMs", 0L)
-                var endTimeMs = payload.optLong("endTimeMs", 0L)
-                var totalBreakMs = payload.optLong("totalBreakMs", 0L)
                 var pauseCount = payload.optInt("pauseCount", 0)
 
                 if (payload.has("metrics")) {
@@ -496,9 +542,28 @@ object OutboxDrainer {
                         if (pauseCount == 0) pauseCount = metrics.optInt("pauseCount", 0)
                     }
                 }
-                
+
+                if (durationFormatted.isEmpty()) {
+                    durationFormatted = com.example.api.TimelineSyncEngine.formatTimeMsToHhMmSs(totalFocusMs)
+                }
+
+                var dateString = payload.optString("dateString", "")
+                if (dateString.isEmpty()) {
+                    dateString = payload.optString("Date_String", "")
+                }
+                if (dateString.isEmpty() && startTimeMs > 0L) {
+                    val sdfDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                    dateString = sdfDate.format(java.util.Date(startTimeMs))
+                }
+                if (dateString.isEmpty()) {
+                    val sdfDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                    dateString = sdfDate.format(java.util.Date())
+                }
+
                 val modeVal = if (payload.has("mode")) {
                     payload.optString("mode")
+                } else if (payload.has("Timer_Mode")) {
+                    payload.optString("Timer_Mode")
                 } else if (payload.has("metrics") && payload.optJSONObject("metrics")?.has("mode") == true) {
                     payload.optJSONObject("metrics")?.optString("mode") ?: "POMODORO"
                 } else {
@@ -507,25 +572,36 @@ object OutboxDrainer {
 
                 val sessionMap = hashMapOf(
                     "recordId" to recordId,
+                    "Session_ID" to recordId,
                     "username" to username,
                     "dateString" to dateString,
+                    "Date_String" to dateString,
                     "sourceDeviceId" to getDeviceId(context),
-                    "subject" to (subject ?: "Study"),
-                    "taskTitle" to (taskTitle ?: "General Focus"),
+                    "subject" to subject,
+                    "Current_Tag" to subject,
+                    "taskTitle" to taskTitle,
+                    "Current_Task" to taskTitle,
                     "startTimeMs" to startTimeMs,
+                    "Start_Timestamp" to startTimeMs,
                     "endTimeMs" to endTimeMs,
+                    "End_Timestamp" to endTimeMs,
                     "totalFocusMs" to totalFocusMs,
+                    "Total_Focus_Time_Ms" to totalFocusMs,
                     "totalBreakMs" to totalBreakMs,
+                    "Total_Break_Time_Ms" to totalBreakMs,
                     "pauseCount" to pauseCount,
                     "durationFormatted" to durationFormatted,
+                    "Total_Focus_Time_Formatted" to durationFormatted,
                     "startTimeFormatted" to startTimeFormatted,
                     "endTimeFormatted" to endTimeFormatted,
                     "mode" to modeVal,
+                    "Timer_Mode" to modeVal,
+                    "isDeleted" to false,
                     "lastModifiedMs" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
                     "timestamp" to com.google.firebase.firestore.FieldValue.serverTimestamp()
                 )
 
-                // 1. FIRST WRITE NEW JSON WITH SESSION ID TO CLOUD FIRESTORE AND CONFIRM IT!
+                // 1. WRITE NEW JSON WITH SESSION ID TO CLOUD FIRESTORE IN ALL THREE COLLECTIONS
                 try {
                     val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance(
                         com.google.firebase.FirebaseApp.getInstance(), 
@@ -537,17 +613,21 @@ object OutboxDrainer {
                         .collection("focus_history").document(recordId)
                         .set(sessionMap, com.google.firebase.firestore.SetOptions.merge())
                         .awaitTask()
-                        
-                    Log.d("OutboxDrainer", "Confirmed Focus Record write under users/$username/focus_history/$recordId")
 
-                    // B. Also save daily record
+                    // B. Save focus records in Firestore
+                    firestore.collection("users").document(username)
+                        .collection("focus_records").document(recordId)
+                        .set(sessionMap, com.google.firebase.firestore.SetOptions.merge())
+                        .awaitTask()
+
+                    // C. Save daily record
                     firestore.collection("users").document(username)
                         .collection("daily_records").document(dateString)
                         .collection("sessions").document(recordId)
                         .set(sessionMap, com.google.firebase.firestore.SetOptions.merge())
                         .awaitTask()
 
-                    // C. Increment daily statistics
+                    // D. Increment daily statistics
                     val dailyStatsRef = firestore.collection("users").document(username)
                         .collection("daily_records").document(dateString)
 
@@ -560,7 +640,7 @@ object OutboxDrainer {
                     dailyStatsRef.set(dailyStatsUpdates, com.google.firebase.firestore.SetOptions.merge()).awaitTask()
                     
                 } catch (firestoreEx: Exception) {
-                    Log.e("OutboxDrainer", "Firestore write was NOT confirmed for session $recordId, aborting RTDB wipe!", firestoreEx)
+                    Log.e("OutboxDrainer", "Firestore write was NOT confirmed for session $recordId, aborting!", firestoreEx)
                     return false // Return false to retry this action later
                 }
 

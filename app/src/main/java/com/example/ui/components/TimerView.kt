@@ -1967,18 +1967,8 @@ fun androidx.compose.foundation.layout.ColumnScope.FriendHistoryDetailsContent(
                     recordsList.addAll(rawFriendRecords)
                     // Also add live active session if they are focusing
                     if (targetUser != null && (targetUser.isFocusing == true || targetUser.focusStatus == "paused")) {
-                        val lastResume = targetUser.lastResumeTimeMs
-                        val startMs = if (lastResume != null) {
-                            lastResume - (targetUser.accumulatedTimeMs ?: 0L)
-                        } else {
-                            System.currentTimeMillis() - (targetUser.accumulatedTimeMs ?: 0L)
-                        }
-                        val currentChunkMs = if (lastResume != null) {
-                            System.currentTimeMillis() - lastResume
-                        } else {
-                            0L
-                        }
-                        val totalMs = (targetUser.accumulatedTimeMs ?: 0L) + maxOf(0L, currentChunkMs)
+                        val totalMs = targetUser.accumulatedTimeMs ?: 0L
+                        val startMs = System.currentTimeMillis() - totalMs
                         val activeSecs = (totalMs / 1000).toInt()
                         if (activeSecs > 0) {
                             val formatter = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault())
@@ -2257,20 +2247,12 @@ fun LiveRecordDurationText(
 
     LaunchedEffect(record, isFocusing, isMe, peerRemote) {
         while (true) {
-            val delayToNextBoundary = 100L - (com.example.util.TimeEngine.getUniversalTimeMs() % 100)
-            kotlinx.coroutines.delay(delayToNextBoundary)
+            kotlinx.coroutines.delay(1000L)
             if (isMe) {
-                val currentChunkMs = FocusTimerManager.getCurrentChunkMs()
-                val totalMs = FocusTimerManager.accumulatedSessionTimeMs.value + currentChunkMs
+                val totalMs = FocusTimerManager.accumulatedSessionTimeMs.value
                 durationSeconds = (totalMs / 1000).toInt()
             } else if (peerRemote != null) {
-                val lastResume = peerRemote.lastResumeTimeMs
-                val currentChunkMs = if (lastResume != null) {
-                    com.example.util.TimeEngine.getUniversalTimeMs() - lastResume
-                } else {
-                    0L
-                }
-                val totalMs = (peerRemote.accumulatedTimeMs ?: 0L).toLong() + maxOf(0L, currentChunkMs)
+                val totalMs = peerRemote.accumulatedTimeMs ?: 0L
                 durationSeconds = (totalMs / 1000).toInt()
             }
         }
@@ -2542,7 +2524,11 @@ fun FriendsFocusDetailsDialog(
         if (isMe) {
             val isLocalFocusing = (FocusTimerManager.isTimerRunning.value || FocusTimerManager.isStopwatchActive.value) && FocusTimerManager.isFocusPhase.value && FocusTimerManager.pendingFocusReview.value == null
             if (isLocalFocusing) {
-                liveActiveSecs = FocusTimerManager.cumulativeSessionFocusSeconds.value + FocusTimerManager.stopwatchSeconds.value
+                liveActiveSecs = if (FocusTimerManager.isStopwatchActive.value) {
+                    FocusTimerManager.stopwatchSeconds.value
+                } else {
+                    FocusTimerManager.cumulativeSessionFocusSeconds.value
+                }
             }
         }
 
@@ -3087,16 +3073,9 @@ fun LiveDurationText(
 
     var liveSeconds by remember(baseSeconds, isFocusing, isMe, peerRemote) {
         val initialSecs = if (isFocusing && !isMe && peerRemote != null) {
-            val currentUnixTime = System.currentTimeMillis() / 1000
             val completedTodaySecs = peerRemote.todaysFocusRecords?.sumOf { FocusTimerManager.getOverlapSecondsForDate(it, systemTodayStr) } ?: 0
-            
-            if (peerRemote.lastResumeTimeMs != null) {
-                val currentChunkMs = (currentUnixTime * 1000) - peerRemote.lastResumeTimeMs!!
-                val totalMs = (peerRemote.accumulatedTimeMs ?: 0L) + maxOf(0L, currentChunkMs)
-                completedTodaySecs + (totalMs / 1000).toInt()
-            } else {
-                completedTodaySecs + ((peerRemote.accumulatedTimeMs ?: 0L) / 1000).toInt()
-            }
+            val totalMs = peerRemote.accumulatedTimeMs ?: 0L
+            completedTodaySecs + (totalMs / 1000).toInt()
         } else {
             baseSeconds
         }
@@ -3106,26 +3085,23 @@ fun LiveDurationText(
     LaunchedEffect(isFocusing, isMe, peerRemote) {
         if (isFocusing) {
             while (true) {
-                val delayToNextBoundary = 100L - (com.example.util.TimeEngine.getUniversalTimeMs() % 100)
-                kotlinx.coroutines.delay(delayToNextBoundary)
-                val currentUnixTime = com.example.util.TimeEngine.getUniversalTimeMs() / 1000
+                kotlinx.coroutines.delay(1000L)
                 if (isMe) {
                     val isLocalFocusing = (FocusTimerManager.isTimerRunning.value || FocusTimerManager.isStopwatchActive.value) && FocusTimerManager.isFocusPhase.value && FocusTimerManager.pendingFocusReview.value == null
                     val completedTodaySecs = FocusTimerManager.focusRecords.value.sumOf { FocusTimerManager.getOverlapSecondsForDate(it, systemTodayStr) }
                     val pendingSecs = FocusTimerManager.pendingFocusReview.value?.let { FocusTimerManager.getOverlapSecondsForDate(it, systemTodayStr) } ?: 0
                     val activeSessionOverlap = if (isLocalFocusing) {
-                        FocusTimerManager.cumulativeSessionFocusSeconds.value + FocusTimerManager.stopwatchSeconds.value
+                        if (FocusTimerManager.isStopwatchActive.value) {
+                            FocusTimerManager.stopwatchSeconds.value
+                        } else {
+                            FocusTimerManager.cumulativeSessionFocusSeconds.value
+                        }
                     } else 0
                     liveSeconds = completedTodaySecs + pendingSecs + activeSessionOverlap
                 } else if (peerRemote != null) {
                     val completedTodaySecs = peerRemote.todaysFocusRecords?.sumOf { FocusTimerManager.getOverlapSecondsForDate(it, systemTodayStr) } ?: 0
-                    if (peerRemote.lastResumeTimeMs != null) {
-                        val currentChunkMs = (currentUnixTime * 1000) - peerRemote.lastResumeTimeMs!!
-                        val totalMs = (peerRemote.accumulatedTimeMs ?: 0L) + maxOf(0L, currentChunkMs)
-                        liveSeconds = completedTodaySecs + (totalMs / 1000).toInt()
-                    } else {
-                        liveSeconds = completedTodaySecs + ((peerRemote.accumulatedTimeMs ?: 0L) / 1000).toInt()
-                    }
+                    val totalMs = peerRemote.accumulatedTimeMs ?: 0L
+                    liveSeconds = completedTodaySecs + (totalMs / 1000).toInt()
                 }
             }
         }
@@ -9588,22 +9564,26 @@ fun VerticalCalendarTimelineView(
                         }
                     } else {
                         // Calculate Cumulative Focus Time Calculator map from oldest (bottom) to newest (top)
-                        val oldestToNewestRecords = remember(todayRecords) {
-                            todayRecords.sortedBy { parseTimeToHourFraction(it.startTime) ?: 0.0 }
+                        val oldestToNewestRecords = remember(todayRecords, selectedDateStr) {
+                            todayRecords.sortedBy { rec ->
+                                val startAndEnd = com.example.util.FocusTimerManager.getRecordStartAndEndMs(rec, selectedDateStr)
+                                startAndEnd?.first ?: 0L
+                            }
                         }
 
-                        val cumulativeFocusMap = remember(oldestToNewestRecords) {
+                        val cumulativeFocusMap = remember(oldestToNewestRecords, selectedDateStr) {
                             val map = mutableMapOf<String, Int>()
                             var cumSecs = 0
                             for (rec in oldestToNewestRecords) {
-                                cumSecs += rec.durationSeconds
+                                val secsToday = com.example.util.FocusTimerManager.getOverlapSecondsForDate(rec, selectedDateStr)
+                                cumSecs += secsToday
                                 map[rec.id] = cumSecs
                             }
                             map
                         }
 
-                        val totalCumulativeTodaySecs = remember(todayRecords) {
-                            todayRecords.sumOf { it.durationSeconds }
+                        val totalCumulativeTodaySecs = remember(todayRecords, selectedDateStr) {
+                            todayRecords.sumOf { com.example.util.FocusTimerManager.getOverlapSecondsForDate(it, selectedDateStr) }
                         }
 
                         Column(
@@ -9706,7 +9686,8 @@ fun VerticalCalendarTimelineView(
 
                             todayRecords.forEach { record ->
                                 val tagColor = getTagColorCalendar(record.tag)
-                                val cumSecs = cumulativeFocusMap[record.id] ?: record.durationSeconds
+                                val recTodaySecs = com.example.util.FocusTimerManager.getOverlapSecondsForDate(record, selectedDateStr)
+                                val cumSecs = cumulativeFocusMap[record.id] ?: recTodaySecs
 
                                 Card(
                                     modifier = Modifier
@@ -9779,7 +9760,7 @@ fun VerticalCalendarTimelineView(
                                             verticalArrangement = Arrangement.spacedBy(4.dp)
                                         ) {
                                             Text(
-                                                text = formatSecondsToReadable(record.durationSeconds),
+                                                text = formatSecondsToReadable(recTodaySecs),
                                                 color = Color(0xFFFFB300), // Arena Gold
                                                 fontWeight = FontWeight.Black,
                                                 fontSize = 12.sp

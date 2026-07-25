@@ -394,7 +394,13 @@ class AppViewModel(
         sessionId: String,
         onResult: (com.example.data.LocalHistoryVault?) -> Unit
     ) {
-        onResult(null)
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val email = if (_userEmail.value.isNotEmpty()) _userEmail.value else com.example.api.DynamicCommandManager.activeEmail
+            val record = com.example.api.FirestoreArchiver.fetchSingleSessionFromFirestore(context, email, sessionId)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                onResult(record)
+            }
+        }
     }
 
 

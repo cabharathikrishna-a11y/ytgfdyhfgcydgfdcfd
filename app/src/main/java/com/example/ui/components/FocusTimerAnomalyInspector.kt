@@ -88,7 +88,7 @@ fun FocusTimerAnomalyCard(
                     isChecking = true
                     actionResultMessage = null
                     scope.launch {
-                        val report = FocusTimerAnomalyChecker.runDiagnosticCheck(context)
+                        val report = FocusTimerAnomalyChecker.runDiagnosticCheck(context, isManualRequest = true)
                         currentReport = report
                         isChecking = false
                         showDialog = true
@@ -357,7 +357,10 @@ fun FocusTimerAnomalyCard(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showDialog = false }) {
+                TextButton(onClick = {
+                    FocusTimerAnomalyChecker.clearAndDismissAnomaly(context)
+                    showDialog = false
+                }) {
                     Text("Close", color = Color(0xFF64B5F6))
                 }
             }

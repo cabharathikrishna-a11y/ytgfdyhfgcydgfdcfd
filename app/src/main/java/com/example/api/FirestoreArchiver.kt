@@ -20,6 +20,106 @@ import kotlin.coroutines.resumeWithException
 object FirestoreArchiver {
     private const val TAG = "FirestoreArchiver"
 
+    fun docToVaultRecord(doc: com.google.firebase.firestore.DocumentSnapshot): LocalHistoryVault {
+        val sessionId = doc.getString("Session_ID")
+            ?: doc.getString("recordId")
+            ?: doc.getString("sessionId")
+            ?: doc.id
+
+        val currentTag = doc.getString("Current_Tag")
+            ?: doc.getString("subject")
+            ?: doc.getString("tag")
+            ?: "Study"
+
+        val currentTask = doc.getString("Current_Task")
+            ?: doc.getString("taskTitle")
+            ?: doc.getString("task_title")
+            ?: ""
+
+        val timerMode = doc.getString("Timer_Mode")
+            ?: doc.getString("mode")
+            ?: "POMODORO"
+
+        val totalFocusMs = doc.getLong("Total_Focus_Time_Ms")
+            ?: doc.getLong("totalFocusMs")
+            ?: doc.getLong("duration_ms")
+            ?: ((doc.getLong("durationSeconds") ?: 0L) * 1000L)
+
+        val totalBreakMs = doc.getLong("Total_Break_Time_Ms")
+            ?: doc.getLong("totalBreakMs")
+            ?: 0L
+
+        val startTimestamp = doc.getLong("Start_Timestamp")
+            ?: doc.getLong("startTimeMs")
+            ?: 0L
+
+        val endTimestamp = doc.getLong("End_Timestamp")
+            ?: doc.getLong("endTimeMs")
+            ?: (if (startTimestamp > 0L && totalFocusMs > 0L) startTimestamp + totalFocusMs else 0L)
+
+        val totalFocusFormatted = doc.getString("Total_Focus_Time_Formatted")
+            ?: doc.getString("durationFormatted")
+            ?: TimelineSyncEngine.formatTimeMsToHhMmSs(totalFocusMs)
+
+        val totalBreakFormatted = doc.getString("Total_Break_Time_Formatted")
+            ?: TimelineSyncEngine.formatTimeMsToHhMmSs(totalBreakMs)
+
+        val timelineList = mutableListOf<TimelineEvent>()
+        val rawTimeline = (doc.get("Timeline") ?: doc.get("timeline")) as? List<Map<String, Any>>
+        if (rawTimeline != null) {
+            for (item in rawTimeline) {
+                val deviceId = item["deviceId"] as? String ?: ""
+                val event = item["event"] as? String ?: ""
+                val timestamp = (item["timestamp"] as? Number)?.toLong() ?: 0L
+                if (event.isNotEmpty()) {
+                    timelineList.add(TimelineEvent(deviceId, event, timestamp))
+                }
+            }
+        }
+
+        val pauseCount = (doc.getLong("pauseCount")?.toInt())
+            ?: timelineList.count { it.event.lowercase() == "paused" || it.event.lowercase() == "break_started" }
+
+        val sdfTime = SimpleDateFormat("HH:mm:ss", Locale.US)
+        val startTimeFormatted = doc.getString("startTimeFormatted")
+            ?: if (startTimestamp > 0L) sdfTime.format(Date(startTimestamp)) else "00:00:00"
+        val endTimeFormatted = doc.getString("endTimeFormatted")
+            ?: if (endTimestamp > 0L) sdfTime.format(Date(endTimestamp)) else "00:00:00"
+
+        val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val dateString = doc.getString("dateString")
+            ?: doc.getString("Date_String")
+            ?: (if (startTimestamp > 0L) sdfDate.format(Date(startTimestamp)) else sdfDate.format(Date()))
+
+        val timelineJsonArray = JSONArray()
+        for (event in timelineList) {
+            val eventObj = JSONObject()
+            eventObj.put("deviceId", event.deviceId)
+            eventObj.put("event", event.event)
+            eventObj.put("timestamp", event.timestamp)
+            timelineJsonArray.put(eventObj)
+        }
+
+        return LocalHistoryVault(
+            record_id = sessionId,
+            date_string = dateString,
+            subject = if (currentTag.isNotEmpty()) currentTag else "Study",
+            task_title = currentTask,
+            start_time_ms = startTimestamp,
+            end_time_ms = endTimestamp,
+            total_focus_ms = totalFocusMs,
+            total_break_ms = totalBreakMs,
+            pause_count = pauseCount,
+            duration_formatted = totalFocusFormatted,
+            start_time_formatted = startTimeFormatted,
+            end_time_formatted = endTimeFormatted,
+            is_synced_to_firestore = 1,
+            mode = timerMode.uppercase(),
+            timeline_json = timelineJsonArray.toString(),
+            timeline = timelineList
+        )
+    }
+
     suspend fun pullAndSyncFocusHistoryFromFirestore(context: Context, email: String): Pair<Boolean, String> {
         if (email.isBlank()) {
             return Pair(false, "User email is blank")
@@ -34,88 +134,59 @@ object FirestoreArchiver {
                 "main"
             )
 
-            val snapshot = suspendCancellableCoroutine { cont ->
-                firestore.collection("users").document(email)
-                    .collection("focus_records")
-                    .get()
-                    .addOnCompleteListener { task ->
-                        if (task.isSuccessful) {
-                            cont.resume(task.result)
-                        } else {
-                            cont.resumeWithException(task.exception ?: Exception("Failed to query focus_records from Firestore"))
+            val documentsMap = mutableMapOf<String, com.google.firebase.firestore.DocumentSnapshot>()
+
+            // Query focus_records
+            try {
+                val snap1 = suspendCancellableCoroutine<com.google.firebase.firestore.QuerySnapshot?> { cont ->
+                    firestore.collection("users").document(email)
+                        .collection("focus_records")
+                        .get()
+                        .addOnCompleteListener { task ->
+                            if (task.isSuccessful) cont.resume(task.result) else cont.resume(null)
                         }
-                    }
+                }
+                snap1?.documents?.forEach { doc ->
+                    val sId = doc.getString("Session_ID") ?: doc.getString("recordId") ?: doc.id
+                    if (sId.isNotEmpty()) documentsMap[sId] = doc
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error querying focus_records: ${e.message}")
             }
 
-            if (snapshot == null || snapshot.isEmpty) {
+            // Query focus_history
+            try {
+                val snap2 = suspendCancellableCoroutine<com.google.firebase.firestore.QuerySnapshot?> { cont ->
+                    firestore.collection("users").document(email)
+                        .collection("focus_history")
+                        .get()
+                        .addOnCompleteListener { task ->
+                            if (task.isSuccessful) cont.resume(task.result) else cont.resume(null)
+                        }
+                }
+                snap2?.documents?.forEach { doc ->
+                    val sId = doc.getString("Session_ID") ?: doc.getString("recordId") ?: doc.id
+                    if (sId.isNotEmpty() && !documentsMap.containsKey(sId)) {
+                        documentsMap[sId] = doc
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error querying focus_history: ${e.message}")
+            }
+
+            if (documentsMap.isEmpty()) {
                 return Pair(true, "No records found in Firestore")
             }
 
             val db = AppDatabase.getInstance(context)
             var count = 0
 
-            for (doc in snapshot.documents) {
-                val sessionId = doc.getString("Session_ID") ?: doc.id
-                val currentTag = doc.getString("Current_Tag") ?: doc.getString("subject") ?: ""
-                val currentTask = doc.getString("Current_Task") ?: doc.getString("task_title") ?: ""
-                val timerMode = doc.getString("Timer_Mode") ?: doc.getString("mode") ?: "POMODORO"
-                val totalFocusMs = doc.getLong("Total_Focus_Time_Ms") ?: 0L
-                val totalBreakMs = doc.getLong("Total_Break_Time_Ms") ?: 0L
-                val startTimestamp = doc.getLong("Start_Timestamp") ?: 0L
-                val endTimestamp = doc.getLong("End_Timestamp") ?: 0L
-                val totalFocusFormatted = doc.getString("Total_Focus_Time_Formatted") ?: TimelineSyncEngine.formatTimeMsToHhMmSs(totalFocusMs)
-                val totalBreakFormatted = doc.getString("Total_Break_Time_Formatted") ?: TimelineSyncEngine.formatTimeMsToHhMmSs(totalBreakMs)
-
-                val timelineList = mutableListOf<TimelineEvent>()
-                val rawTimeline = doc.get("Timeline") as? List<Map<String, Any>>
-                if (rawTimeline != null) {
-                    for (item in rawTimeline) {
-                        val deviceId = item["deviceId"] as? String ?: ""
-                        val event = item["event"] as? String ?: ""
-                        val timestamp = (item["timestamp"] as? Number)?.toLong() ?: 0L
-                        if (event.isNotEmpty()) {
-                            timelineList.add(TimelineEvent(deviceId, event, timestamp))
-                        }
-                    }
+            for ((_, doc) in documentsMap) {
+                val vaultRecord = docToVaultRecord(doc)
+                if (vaultRecord.record_id.isNotEmpty()) {
+                    db.localHistoryVaultDao().insertRecord(vaultRecord)
+                    count++
                 }
-
-                val pauseCount = timelineList.count { it.event.lowercase() == "paused" || it.event.lowercase() == "break_started" }
-                val sdfTime = SimpleDateFormat("HH:mm:ss", Locale.US)
-                val startTimeFormatted = if (startTimestamp > 0L) sdfTime.format(Date(startTimestamp)) else "00:00:00"
-                val endTimeFormatted = if (endTimestamp > 0L) sdfTime.format(Date(endTimestamp)) else "00:00:00"
-                val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-                val dateString = if (startTimestamp > 0L) sdfDate.format(Date(startTimestamp)) else ""
-
-                val timelineJsonArray = JSONArray()
-                for (event in timelineList) {
-                    val eventObj = JSONObject()
-                    eventObj.put("deviceId", event.deviceId)
-                    eventObj.put("event", event.event)
-                    eventObj.put("timestamp", event.timestamp)
-                    timelineJsonArray.put(eventObj)
-                }
-
-                val vaultRecord = LocalHistoryVault(
-                    record_id = sessionId,
-                    date_string = dateString,
-                    subject = if (currentTag.isNotEmpty()) currentTag else "Study",
-                    task_title = currentTask,
-                    start_time_ms = startTimestamp,
-                    end_time_ms = endTimestamp,
-                    total_focus_ms = totalFocusMs,
-                    total_break_ms = totalBreakMs,
-                    pause_count = pauseCount,
-                    duration_formatted = totalFocusFormatted,
-                    start_time_formatted = startTimeFormatted,
-                    end_time_formatted = endTimeFormatted,
-                    is_synced_to_firestore = 1,
-                    mode = timerMode.uppercase(),
-                    timeline_json = timelineJsonArray.toString(),
-                    timeline = timelineList
-                )
-
-                db.localHistoryVaultDao().insertRecord(vaultRecord)
-                count++
             }
 
             Log.d(TAG, "Successfully pulled and synced $count records from Firestore to SQLite.")
@@ -127,6 +198,62 @@ object FirestoreArchiver {
             Log.e(TAG, "Error in pullAndSyncFocusHistoryFromFirestore", e)
             return Pair(false, e.message ?: "Unknown error")
         }
+    }
+
+    suspend fun fetchSingleSessionFromFirestore(context: Context, email: String, sessionId: String): LocalHistoryVault? {
+        val trimmedId = sessionId.trim()
+        if (trimmedId.isBlank()) return null
+
+        val db = AppDatabase.getInstance(context)
+        val localRec = db.localHistoryVaultDao().getRecordById(trimmedId)
+        if (localRec != null) return localRec
+
+        if (!com.example.util.NetworkChecker.isOnline(context)) return null
+
+        try {
+            val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance(
+                com.google.firebase.FirebaseApp.getInstance(),
+                "main"
+            )
+
+            val collectionsToTry = listOf("focus_records", "focus_history")
+            for (col in collectionsToTry) {
+                val docSnap = suspendCancellableCoroutine<com.google.firebase.firestore.DocumentSnapshot?> { cont ->
+                    firestore.collection("users").document(email)
+                        .collection(col).document(trimmedId)
+                        .get()
+                        .addOnCompleteListener { task ->
+                            if (task.isSuccessful) cont.resume(task.result) else cont.resume(null)
+                        }
+                }
+                if (docSnap != null && docSnap.exists()) {
+                    val vaultRecord = docToVaultRecord(docSnap)
+                    db.localHistoryVaultDao().insertRecord(vaultRecord)
+                    com.example.util.FocusTimerManager.reloadFocusRecordsFromDb(context)
+                    return vaultRecord
+                }
+            }
+
+            // Also search daily_records subcollections or group
+            val querySnap = suspendCancellableCoroutine<com.google.firebase.firestore.QuerySnapshot?> { cont ->
+                firestore.collectionGroup("sessions")
+                    .whereEqualTo("recordId", trimmedId)
+                    .get()
+                    .addOnCompleteListener { task ->
+                        if (task.isSuccessful) cont.resume(task.result) else cont.resume(null)
+                    }
+            }
+            if (querySnap != null && !querySnap.isEmpty) {
+                val docSnap = querySnap.documents.first()
+                val vaultRecord = docToVaultRecord(docSnap)
+                db.localHistoryVaultDao().insertRecord(vaultRecord)
+                com.example.util.FocusTimerManager.reloadFocusRecordsFromDb(context)
+                return vaultRecord
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching single session $trimmedId from Firestore", e)
+        }
+        return null
     }
 
     suspend fun archiveSessionPayload(
@@ -148,18 +275,33 @@ object FirestoreArchiver {
         val totalFocusFormatted = TimelineSyncEngine.formatTimeMsToHhMmSs(totalFocusMs)
         val totalBreakFormatted = TimelineSyncEngine.formatTimeMsToHhMmSs(totalBreakMs)
 
-        // Construct Firestore payload map
+        val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val dateString = sdfDate.format(Date(startTimestamp))
+
+        // Construct unified Firestore payload map (both camelCase and PascalCase keys)
         val payloadMap = hashMapOf<String, Any>(
             "Session_ID" to sessionId,
+            "recordId" to sessionId,
             "Current_Tag" to currentTag,
+            "subject" to currentTag,
             "Current_Task" to currentTask,
+            "taskTitle" to currentTask,
             "Timer_Mode" to timerMode,
+            "mode" to timerMode,
             "Total_Focus_Time_Formatted" to totalFocusFormatted,
+            "durationFormatted" to totalFocusFormatted,
             "Total_Break_Time_Formatted" to totalBreakFormatted,
             "Total_Focus_Time_Ms" to totalFocusMs,
+            "totalFocusMs" to totalFocusMs,
             "Total_Break_Time_Ms" to totalBreakMs,
+            "totalBreakMs" to totalBreakMs,
             "Start_Timestamp" to startTimestamp,
+            "startTimeMs" to startTimestamp,
             "End_Timestamp" to endTimestamp,
+            "endTimeMs" to endTimestamp,
+            "dateString" to dateString,
+            "Date_String" to dateString,
+            "isDeleted" to false,
             "Timeline" to timeline.map {
                 mapOf(
                     "deviceId" to it.deviceId,
@@ -171,7 +313,7 @@ object FirestoreArchiver {
 
         var isSyncedSuccessfully = false
 
-        // 1. Primary Upload: Attempt direct Firestore set
+        // 1. Primary Upload: Attempt direct Firestore set to all relevant collections
         try {
             if (com.example.util.NetworkChecker.isOnline(context)) {
                 val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance(
@@ -182,6 +324,17 @@ object FirestoreArchiver {
                 kotlinx.coroutines.withTimeout(5000L) {
                     firestore.collection("users").document(email)
                         .collection("focus_records").document(sessionId)
+                        .set(payloadMap, com.google.firebase.firestore.SetOptions.merge())
+                        .awaitTask()
+
+                    firestore.collection("users").document(email)
+                        .collection("focus_history").document(sessionId)
+                        .set(payloadMap, com.google.firebase.firestore.SetOptions.merge())
+                        .awaitTask()
+
+                    firestore.collection("users").document(email)
+                        .collection("daily_records").document(dateString)
+                        .collection("sessions").document(sessionId)
                         .set(payloadMap, com.google.firebase.firestore.SetOptions.merge())
                         .awaitTask()
                 }
@@ -200,8 +353,6 @@ object FirestoreArchiver {
         val sdfTime = SimpleDateFormat("HH:mm:ss", Locale.US)
         val startTimeFormatted = sdfTime.format(Date(startTimestamp))
         val endTimeFormatted = sdfTime.format(Date(endTimestamp))
-        val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        val dateString = sdfDate.format(Date(startTimestamp))
 
         // Serialize timeline to JSON
         val timelineJsonArray = JSONArray()
@@ -249,7 +400,7 @@ object FirestoreArchiver {
             val outboxItem = OutboxQueue(
                 mutation_id = "mut_arch_${UUID.randomUUID()}",
                 created_at_ms = com.example.util.TimeEngine.getTrueTimeMs(),
-                routing_target = "FIRESTORE", // target = "FIRESTORE"
+                routing_target = "FIRESTORE",
                 action_type = "ARCHIVE_SESSION",
                 payload_json = payloadJsonStr,
                 retry_count = 0,
@@ -270,16 +421,43 @@ object FirestoreArchiver {
 
     private fun serializePayloadToJson(payload: Map<String, Any>): String {
         val json = JSONObject()
-        json.put("Session_ID", payload["Session_ID"])
-        json.put("Current_Tag", payload["Current_Tag"])
-        json.put("Current_Task", payload["Current_Task"])
-        json.put("Timer_Mode", payload["Timer_Mode"])
-        json.put("Total_Focus_Time_Formatted", payload["Total_Focus_Time_Formatted"])
-        json.put("Total_Break_Time_Formatted", payload["Total_Break_Time_Formatted"])
-        json.put("Total_Focus_Time_Ms", payload["Total_Focus_Time_Ms"])
-        json.put("Total_Break_Time_Ms", payload["Total_Break_Time_Ms"])
-        json.put("Start_Timestamp", payload["Start_Timestamp"])
-        json.put("End_Timestamp", payload["End_Timestamp"])
+        val sessionId = (payload["Session_ID"] ?: payload["recordId"] ?: "").toString()
+        val tag = (payload["Current_Tag"] ?: payload["subject"] ?: "").toString()
+        val task = (payload["Current_Task"] ?: payload["taskTitle"] ?: "").toString()
+        val mode = (payload["Timer_Mode"] ?: payload["mode"] ?: "POMODORO").toString()
+        val focusMs = (payload["Total_Focus_Time_Ms"] as? Number)?.toLong()
+            ?: (payload["totalFocusMs"] as? Number)?.toLong() ?: 0L
+        val breakMs = (payload["Total_Break_Time_Ms"] as? Number)?.toLong()
+            ?: (payload["totalBreakMs"] as? Number)?.toLong() ?: 0L
+        val startTs = (payload["Start_Timestamp"] as? Number)?.toLong()
+            ?: (payload["startTimeMs"] as? Number)?.toLong() ?: 0L
+        val endTs = (payload["End_Timestamp"] as? Number)?.toLong()
+            ?: (payload["endTimeMs"] as? Number)?.toLong() ?: 0L
+
+        json.put("Session_ID", sessionId)
+        json.put("recordId", sessionId)
+        json.put("Current_Tag", tag)
+        json.put("subject", tag)
+        json.put("Current_Task", task)
+        json.put("taskTitle", task)
+        json.put("Timer_Mode", mode)
+        json.put("mode", mode)
+        json.put("Total_Focus_Time_Formatted", payload["Total_Focus_Time_Formatted"] ?: TimelineSyncEngine.formatTimeMsToHhMmSs(focusMs))
+        json.put("durationFormatted", payload["Total_Focus_Time_Formatted"] ?: TimelineSyncEngine.formatTimeMsToHhMmSs(focusMs))
+        json.put("Total_Break_Time_Formatted", payload["Total_Break_Time_Formatted"] ?: TimelineSyncEngine.formatTimeMsToHhMmSs(breakMs))
+        json.put("Total_Focus_Time_Ms", focusMs)
+        json.put("totalFocusMs", focusMs)
+        json.put("Total_Break_Time_Ms", breakMs)
+        json.put("totalBreakMs", breakMs)
+        json.put("Start_Timestamp", startTs)
+        json.put("startTimeMs", startTs)
+        json.put("End_Timestamp", endTs)
+        json.put("endTimeMs", endTs)
+
+        val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val dateStr = if (startTs > 0L) sdfDate.format(Date(startTs)) else sdfDate.format(Date())
+        json.put("dateString", dateStr)
+        json.put("Date_String", dateStr)
 
         val timelineArray = JSONArray()
         val timelineList = payload["Timeline"] as? List<Map<String, Any>> ?: emptyList()

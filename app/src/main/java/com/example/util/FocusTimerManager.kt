@@ -3654,35 +3654,100 @@ object FocusTimerManager {
         ).toInt()
     }
 
-    fun getOverlapSecondsForDate(record: FocusRecord, targetDateStr: String): Int {
-        if (record.dateString == targetDateStr || record.dateString.isEmpty()) {
-            return record.durationSeconds
+    fun parseTimeToHourFraction(timeStr: String): Double? {
+        return try {
+            val cleanStr = timeStr.trim().uppercase()
+            val hasPm = cleanStr.contains("PM")
+            val hasAm = cleanStr.contains("AM")
+            
+            val digitsPart = cleanStr.replace("PM", "").replace("AM", "").trim()
+            val hms = digitsPart.split(":")
+            if (hms.isEmpty()) return null
+            
+            var hour = hms[0].toIntOrNull() ?: 0
+            val min = if (hms.size > 1) hms[1].toIntOrNull() ?: 0 else 0
+            
+            if (hasPm && hour < 12) {
+                hour += 12
+            } else if (hasAm && hour == 12) {
+                hour = 0
+            }
+            
+            hour + min / 60.0
+        } catch (e: Exception) {
+            null
         }
-        try {
-            val dateStr = if (record.dateString.isNotEmpty()) record.dateString else targetDateStr
-            val fullStr = "$dateStr ${record.endTime}"
-            val formats = listOf(
-                "yyyy-MM-dd hh:mm:ss a",
-                "yyyy-MM-dd hh:mm a",
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd HH:mm"
-            )
-            var endDate: java.util.Date? = null
+    }
+
+    fun getRecordStartAndEndMs(record: FocusRecord, targetDateStr: String? = null): Pair<Long, Long>? {
+        val recDateStr = if (record.dateString.isNotEmpty()) record.dateString else (targetDateStr ?: "")
+        if (recDateStr.isEmpty()) return null
+
+        val sFrac = parseTimeToHourFraction(record.startTime)
+        val eFrac = parseTimeToHourFraction(record.endTime)
+        val durationMs = record.durationSeconds * 1000L
+
+        val formats = listOf(
+            "yyyy-MM-dd hh:mm:ss a",
+            "yyyy-MM-dd hh:mm a",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd HH:mm"
+        )
+
+        fun parseDate(str: String): java.util.Date? {
             for (fmt in formats) {
                 try {
                     val parser = java.text.SimpleDateFormat(fmt, java.util.Locale.getDefault())
-                    endDate = parser.parse(fullStr)
-                    if (endDate != null) break
-                } catch (e: Exception) {
-                    // Try next format
-                }
+                    val d = parser.parse(str)
+                    if (d != null) return d
+                } catch (_: Exception) {}
             }
-            val resolvedEndDate = endDate ?: return 0
-            val endMs = resolvedEndDate.time
-            val startMs = endMs - (record.durationSeconds * 1000L)
-            
+            return null
+        }
+
+        if (sFrac != null && eFrac != null && eFrac < sFrac) {
+            val parsedStart = parseDate("$recDateStr ${record.startTime}")
+            val parsedEnd = parseDate("$recDateStr ${record.endTime}")
+
+            if (parsedStart != null && parsedEnd != null) {
+                val sTime: Long = parsedStart.time
+                val eTime: Long = parsedEnd.time
+                if (sTime > eTime) {
+                    val endMs = eTime
+                    val startMs = endMs - durationMs
+                    return Pair(startMs, endMs)
+                } else {
+                    val startMs = sTime
+                    val endMs = startMs + durationMs
+                    return Pair(startMs, endMs)
+                }
+            } else if (parsedStart != null) {
+                val startMs: Long = parsedStart.time
+                val endMs = startMs + durationMs
+                return Pair(startMs, endMs)
+            } else if (parsedEnd != null) {
+                val endMs: Long = parsedEnd.time
+                val startMs = endMs - durationMs
+                return Pair(startMs, endMs)
+            }
+        } else {
+            val parsedStart = parseDate("$recDateStr ${record.startTime}")
+            if (parsedStart != null) {
+                val startMs: Long = parsedStart.time
+                val endMs = if (durationMs > 0) startMs + durationMs else {
+                    val parsedEnd = parseDate("$recDateStr ${record.endTime}")
+                    if (parsedEnd != null) parsedEnd.time else (startMs + durationMs)
+                }
+                return Pair(startMs, endMs)
+            }
+        }
+        return null
+    }
+
+    fun getOverlapSecondsForDate(record: FocusRecord, targetDateStr: String): Int {
+        try {
             val dateParser = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
-            val targetDate = dateParser.parse(targetDateStr) ?: return 0
+            val targetDate = dateParser.parse(targetDateStr) ?: return record.durationSeconds
             val calendar = java.util.Calendar.getInstance()
             calendar.time = targetDate
             calendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
@@ -3690,16 +3755,26 @@ object FocusTimerManager {
             calendar.set(java.util.Calendar.SECOND, 0)
             calendar.set(java.util.Calendar.MILLISECOND, 0)
             val targetStartMs = calendar.timeInMillis
-            
+
             calendar.set(java.util.Calendar.HOUR_OF_DAY, 23)
             calendar.set(java.util.Calendar.MINUTE, 59)
             calendar.set(java.util.Calendar.SECOND, 59)
             calendar.set(java.util.Calendar.MILLISECOND, 999)
             val targetEndMs = calendar.timeInMillis
-            
+
+            val startAndEnd = getRecordStartAndEndMs(record, targetDateStr)
+            if (startAndEnd == null) {
+                if (record.dateString == targetDateStr || record.dateString.isEmpty()) {
+                    return record.durationSeconds
+                }
+                return 0
+            }
+
+            val (startMs, endMs) = startAndEnd
+
             val overlapStart = maxOf(startMs, targetStartMs)
             val overlapEnd = minOf(endMs, targetEndMs)
-            
+
             return if (overlapEnd > overlapStart) {
                 ((overlapEnd - overlapStart) / 1000).toInt()
             } else {
@@ -4024,6 +4099,88 @@ object FocusTimerManager {
         val prefs = context.applicationContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
         prefs.edit().putString("focus_tags_list", tags.joinToString(",")).apply()
         _focusTags.value = tags
+    }
+
+    /**
+     * Auto-heals discrepancies between LocalHistoryVaultDao and FocusRecordDao without losing sessions.
+     * Backfills missing sessions into LocalHistoryVault first, then syncs FocusRecords table to match.
+     */
+    suspend fun autoHealVaultAndFocusRecords(context: Context) {
+        try {
+            val appContext = context.applicationContext
+            val db = AppDatabase.getInstance(appContext)
+            val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+            val focusRecords = db.focusRecordDao().getRecordsForDate(todayStr)
+            val vaultRecords = db.localHistoryVaultDao().getAllHistoryDirect().filter { it.date_string == todayStr }
+
+            // 1. Backfill from FocusRecords to LocalHistoryVault if FocusRecords has non-overlapping extra records
+            for (fr in focusRecords) {
+                val durationMs = fr.durationSeconds * 1000L
+                if (durationMs <= 0L) continue
+                val startMs = if (fr.timestamp > 0L) fr.timestamp else (System.currentTimeMillis() - durationMs)
+
+                val isAlreadyInVault = vaultRecords.any { vr ->
+                    kotlin.math.abs(vr.start_time_ms - startMs) < 10000L ||
+                    (vr.total_focus_ms == durationMs && (vr.task_title == fr.taskTitle || vr.subject == fr.tag))
+                }
+
+                if (!isAlreadyInVault) {
+                    val cleanStart = if (fr.startTime.length > 8 && fr.startTime.contains(":")) fr.startTime.take(8) else fr.startTime
+                    val cleanEnd = if (fr.endTime.length > 8 && fr.endTime.contains(":")) fr.endTime.take(8) else fr.endTime
+                    val newVaultRecord = com.example.data.LocalHistoryVault(
+                        record_id = "vlt_heal_${System.currentTimeMillis()}_${(1000..9999).random()}",
+                        date_string = todayStr,
+                        subject = fr.tag ?: "General",
+                        task_title = fr.taskTitle ?: "General Focus",
+                        start_time_ms = startMs,
+                        end_time_ms = startMs + durationMs,
+                        total_focus_ms = durationMs,
+                        total_break_ms = 0L,
+                        pause_count = 0,
+                        duration_formatted = TimeEngine.formatDuration(durationMs),
+                        start_time_formatted = if (cleanStart.isBlank()) TimeEngine.formatTimestamp(startMs) else cleanStart,
+                        end_time_formatted = if (cleanEnd.isBlank()) TimeEngine.formatTimestamp(startMs + durationMs) else cleanEnd,
+                        mode = fr.notes ?: "POMODORO",
+                        is_synced_to_firestore = 0
+                    )
+                    db.localHistoryVaultDao().insertRecord(newVaultRecord)
+                    Log.d("FocusTimerManager", "Auto-healed missing session from FocusRecords to LocalHistoryVault: ${newVaultRecord.record_id}")
+                }
+            }
+
+            // 2. Refresh vault records after backfill and sync focus_records table to match localHistoryVault
+            val refreshedVaultRecords = db.localHistoryVaultDao().getAllHistoryDirect().filter { it.date_string == todayStr }
+            db.focusRecordDao().deleteRecordsForDate(todayStr)
+
+            for (vr in refreshedVaultRecords) {
+                val cleanStart = if (vr.start_time_formatted.length > 8 && vr.start_time_formatted.contains(":")) vr.start_time_formatted.take(8) else vr.start_time_formatted
+                val cleanEnd = if (vr.end_time_formatted.length > 8 && vr.end_time_formatted.contains(":")) vr.end_time_formatted.take(8) else vr.end_time_formatted
+                val newFr = com.example.data.FocusRecordEntity(
+                    taskTitle = vr.task_title ?: "General Focus",
+                    tag = vr.subject,
+                    notes = vr.mode,
+                    durationSeconds = (vr.total_focus_ms / 1000).toInt(),
+                    durationMinutes = (vr.total_focus_ms / 1000 / 60).toInt(),
+                    dateString = vr.date_string,
+                    startTime = cleanStart,
+                    endTime = cleanEnd,
+                    timestamp = vr.start_time_ms
+                )
+                db.focusRecordDao().insertRecord(newFr)
+            }
+
+            // 3. Reload memory lists and update display preferences
+            reloadFocusRecordsFromDb(appContext)
+
+            val correctTotalMs = refreshedVaultRecords.sumOf { it.total_focus_ms }
+            val correctTotalMinutes = (correctTotalMs / 1000 / 60).toInt()
+            val prefs = appContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putInt("total_focus_minutes", correctTotalMinutes).apply()
+
+        } catch (e: Exception) {
+            Log.e("FocusTimerManager", "Error in autoHealVaultAndFocusRecords", e)
+        }
     }
 }
 
