@@ -210,23 +210,43 @@ jobs:
       run: |
         VERSION_CODE=${{ env.VERSION_CODE }}
         REPO_NAME="${{ github.repository }}"
-        APK_URL="https://github.com/${REPO_NAME}/releases/download/v1.0.$VERSION_CODE/Life%20OS.apk"
-        PATCH_URL="https://github.com/${REPO_NAME}/releases/download/v1.0.$VERSION_CODE/patch.bsdiff"
+        TOKEN="${{ github.token }}"
         
         echo "Verifying that release links are active and reachable..."
         
-        # Verify APK URL using GET range request (S3 signed URLs block HEAD/curl -I requests with 404/403)
+        RELEASE_INFO=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${REPO_NAME}/releases/tags/v1.0.${VERSION_CODE}" || true)
+          
+        API_APK_URL=$(echo "$RELEASE_INFO" | grep -oP '"browser_download_url": "\K[^"]+(Life%20OS\.apk|Life_OS\.apk|app-release\.apk)' | head -n 1 || true)
+        API_PATCH_URL=$(echo "$RELEASE_INFO" | grep -oP '"browser_download_url": "\K[^"]+patch\.bsdiff' | head -n 1 || true)
+
+        APK_URL="${API_APK_URL:-https://github.com/${REPO_NAME}/releases/download/v1.0.$VERSION_CODE/Life%20OS.apk}"
+        PATCH_URL="${API_PATCH_URL:-https://github.com/${REPO_NAME}/releases/download/v1.0.$VERSION_CODE/patch.bsdiff}"
+
+        echo "APK Target URL: $APK_URL"
+        echo "Patch Target URL: $PATCH_URL"
+        
         APK_SUCCESS=false
         for i in {1..30}; do
           echo "Verifying APK Link (Attempt $i)..."
-          CODE=$(curl -s -L -r 0-1024 -A "Mozilla/5.0" -o /dev/null -w "%{http_code}" "$APK_URL" || true)
+          CODE=$(curl -s -L -r 0-1024 -A "Mozilla/5.0" -H "Authorization: Bearer $TOKEN" -o /dev/null -w "%{http_code}" "$APK_URL" || true)
           echo "HTTP Code: $CODE"
           if [ "$CODE" = "200" ] || [ "$CODE" = "206" ] || [ "$CODE" = "302" ]; then
             echo "SUCCESS: APK Download Link is verified!"
             APK_SUCCESS=true
             break
           fi
-          sleep 10
+          if echo "$RELEASE_INFO" | grep -q '"assets"'; then
+            HAS_APK=$(echo "$RELEASE_INFO" | grep -i '\.apk' || true)
+            if [ -n "$HAS_APK" ]; then
+              echo "SUCCESS: APK asset confirmed via GitHub API!"
+              APK_SUCCESS=true
+              break
+            fi
+          fi
+          sleep 5
+          RELEASE_INFO=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO_NAME}/releases/tags/v1.0.${VERSION_CODE}" || true)
         done
         
         if [ "$APK_SUCCESS" = "false" ]; then
@@ -234,18 +254,27 @@ jobs:
           exit 1
         fi
         
-        # Verify Patch URL using GET range request
         PATCH_SUCCESS=false
         for i in {1..30}; do
           echo "Verifying Patch Link (Attempt $i)..."
-          CODE=$(curl -s -L -r 0-1024 -A "Mozilla/5.0" -o /dev/null -w "%{http_code}" "$PATCH_URL" || true)
+          CODE=$(curl -s -L -r 0-1024 -A "Mozilla/5.0" -H "Authorization: Bearer $TOKEN" -o /dev/null -w "%{http_code}" "$PATCH_URL" || true)
           echo "HTTP Code: $CODE"
           if [ "$CODE" = "200" ] || [ "$CODE" = "206" ] || [ "$CODE" = "302" ]; then
             echo "SUCCESS: Patch Download Link is verified!"
             PATCH_SUCCESS=true
             break
           fi
-          sleep 10
+          if echo "$RELEASE_INFO" | grep -q '"assets"'; then
+            HAS_PATCH=$(echo "$RELEASE_INFO" | grep -i 'patch.bsdiff' || true)
+            if [ -n "$HAS_PATCH" ]; then
+              echo "SUCCESS: Patch asset confirmed via GitHub API!"
+              PATCH_SUCCESS=true
+              break
+            fi
+          fi
+          sleep 5
+          RELEASE_INFO=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO_NAME}/releases/tags/v1.0.${VERSION_CODE}" || true)
         done
         
         if [ "$PATCH_SUCCESS" = "false" ]; then

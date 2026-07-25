@@ -30,8 +30,8 @@ object RichContentReceiverHelper {
         "video/*",
         "audio/*",
         "application/pdf",
-        "text/*",
-        "*/*"
+        "application/*",
+        "text/*"
     )
 
     interface OnRichContentCallback {
